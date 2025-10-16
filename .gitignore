@@ -1,0 +1,69 @@
+# Dépendances
+node_modules/
+package-lock.json
+
+# Variables d'environnement sensibles
+.env
+.env.local
+.env.*.local
+
+# Build et distribution
+dist/
+build/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Cache et fichiers temporaires
+.npm
+.eslintcache
+.cache/
+*.tmp
+*.temp
+
+# Couverture de tests
+coverage/
+.nyc_output/
+
+# Fichiers système macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Fichiers système Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Fichiers système Linux
+*~
+.directory
+
+# IDEs et éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Fichiers de release/distribution Electron
+*.dmg
+*.pkg
+*.deb
+*.rpm
+*.exe
+*.zip
+*.tar.gz
+*.asar

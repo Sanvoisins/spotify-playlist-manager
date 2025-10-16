@@ -1,0 +1,53 @@
+{
+  "name": "spotify-playlist-manager",
+  "version": "1.0.0",
+  "description": "Gestionnaire de playlists Spotify",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.spotifyplaylist.manager",
+    "productName": "Spotify Playlist Manager",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "assets/icon.icns"
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": "nsis"
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "target": "AppImage",
+      "category": "Audio"
+    },
+    "files": [
+      "**/*",
+      "!.env",
+      "!**/*.md"
+    ]
+  },
+  "keywords": [
+    "spotify",
+    "playlist",
+    "music"
+  ],
+  "author": "Votre Nom",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  }
+}
