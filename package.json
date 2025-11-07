@@ -1,7 +1,7 @@
 {
   "name": "spotify-playlist-manager",
-  "version": "1.0.0",
-  "description": "Gestionnaire de playlists Spotify",
+  "version": "1.1.0",
+  "description": "Gestionnaire de playlists Spotify avec système de checkpoint automatique",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -40,7 +40,7 @@
     "playlist",
     "music"
   ],
-  "author": "Votre Nom",
+  "author": "Antoine SANVOISIN",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",

@@ -1,3 +1,4 @@
+
 # Spotify Playlist Manager
 
 Application de bureau pour créer des playlists Spotify à partir de morceaux sélectionnés dans vos playlists existantes.
@@ -60,6 +61,15 @@ npm start
 5. **Créez** votre nouvelle playlist
 6. **Partagez** le lien généré !
 
+### Nouveauté : Système de checkpoint
+
+L'application sauvegarde automatiquement votre progression lors de la création d'une playlist :
+
+- **Sauvegarde automatique** : Chaque batch de 100 morceaux ajouté est sauvegardé
+- **Récupération après crash** : Si l'application se ferme, vous verrez une notification au redémarrage
+- **Historique** : Cliquez sur "Historique" pour retrouver toutes vos playlists créées (jusqu'à 50)
+- **Lien direct** : Accédez rapidement à vos playlists depuis l'historique
+
 ## 📦 Build
 
 ### Créer un exécutable
@@ -86,6 +96,9 @@ Les fichiers se trouvent dans le dossier `dist/`
 - ✅ Création de playlist Spotify
 - ✅ Lien de partage instantané
 - ✅ Interface moderne et fluide
+- ✅ **Système de checkpoint automatique** - Sauvegarde la progression pendant la création
+- ✅ **Historique des playlists** - Retrouvez toutes vos playlists créées
+- ✅ **Récupération après crash** - Reprenez là où vous vous êtes arrêté
 
 ## 🔒 Sécurité
 
