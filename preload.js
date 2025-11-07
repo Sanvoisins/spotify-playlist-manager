@@ -6,5 +6,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('spotify-callback', (event, url) => {
       callback(url);
     });
+  },
+  onSpotifyAuthCode: (callback) => {
+    ipcRenderer.on('spotify-auth-code', (event, code) => {
+      callback(code);
+    });
   }
 });

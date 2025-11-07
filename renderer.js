@@ -10,10 +10,49 @@ async function loadConfig() {
     const config = await response.json();
     CLIENT_ID = config.clientId;
     REDIRECT_URI = config.redirectUri;
+    state.isConfigured = config.isConfigured;
+
+    if (!state.isConfigured) {
+      console.log('⚠️ Configuration manquante');
+      state.view = 'setup';
+    }
+
     console.log('✅ Configuration chargée');
   } catch (error) {
     console.error('❌ Erreur chargement config:', error);
-    alert('Erreur: Impossible de charger la configuration. Assurez-vous que le fichier .env existe.');
+    state.view = 'setup';
+    state.isConfigured = false;
+  }
+}
+
+// Sauvegarder la configuration
+async function saveConfig() {
+  if (!state.setupClientId || state.setupClientId.trim() === '') {
+    alert('⚠️ Veuillez entrer votre Client ID Spotify');
+    return;
+  }
+
+  try {
+    const response = await fetch('http://127.0.0.1:8888/save-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId: state.setupClientId })
+    });
+
+    const result = await response.json();
+
+    if (response.ok) {
+      console.log('✅ Configuration sauvegardée');
+      // Recharger la config
+      await loadConfig();
+      state.view = 'auth';
+      render();
+    } else {
+      alert(`❌ Erreur: ${result.error}`);
+    }
+  } catch (error) {
+    console.error('❌ Erreur sauvegarde config:', error);
+    alert('❌ Erreur lors de la sauvegarde de la configuration');
   }
 }
 
@@ -35,7 +74,9 @@ let state = {
   isWaitingForAuth: false,
   playlistHistory: [],
   showHistory: false,
-  pendingCheckpoint: null
+  pendingCheckpoint: null,
+  isConfigured: false,
+  setupClientId: ''
 };
 
 // Fonctions de gestion des checkpoints
@@ -179,10 +220,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadSession();
   loadHistory();
   loadCheckpoint();
-  startPollingForAuthCode();
+  setupAuthCodeListener(); // Écouter les codes via IPC
+  startPollingForAuthCode(); // Garder le fallback polling
   render();
 });
 
+// Écouter le code d'autorisation via IPC (méthode principale)
+function setupAuthCodeListener() {
+  if (window.electronAPI && window.electronAPI.onSpotifyAuthCode) {
+    window.electronAPI.onSpotifyAuthCode((code) => {
+      console.log('✅ Code reçu via IPC');
+      if (code && !state.token && state.isWaitingForAuth) {
+        state.isWaitingForAuth = false;
+        exchangeCodeForToken(code);
+      }
+    });
+  }
+}
+
+// Fallback: polling pour assurer la compatibilité
 function startPollingForAuthCode() {
   setInterval(() => {
     const authCode = sessionStorage.getItem('spotify_auth_code');
@@ -193,7 +249,7 @@ function startPollingForAuthCode() {
       exchangeCodeForToken(authCode);
     }
   }, 500);
-  
+
   setInterval(async () => {
     if (state.isWaitingForAuth && !state.token) {
       try {
@@ -215,16 +271,19 @@ function loadSession() {
   const savedToken = localStorage.getItem('spotify_token');
   const savedUser = localStorage.getItem('spotify_user');
   const savedExpiry = localStorage.getItem('token_expiry');
-  
+
   if (savedToken && savedUser && savedExpiry) {
     const expiryTime = parseInt(savedExpiry);
     if (Date.now() < expiryTime) {
       console.log('✅ Session existante trouvée');
       state.token = savedToken;
       state.user = JSON.parse(savedUser);
-      state.view = 'playlists';
-      render(); // Afficher immédiatement
-      fetchPlaylists(); // Charger en arrière-plan
+      // Ne changer la vue que si la configuration est valide
+      if (state.isConfigured) {
+        state.view = 'playlists';
+        render(); // Afficher immédiatement
+        fetchPlaylists(); // Charger en arrière-plan
+      }
     }
   }
 }
@@ -236,7 +295,7 @@ async function connectSpotify() {
     const codeChallenge = await generateCodeChallenge(codeVerifier);
     sessionStorage.setItem('code_verifier', codeVerifier);
     state.isWaitingForAuth = true;
-    
+
     const authUrl = `https://accounts.spotify.com/authorize?` +
       `client_id=${CLIENT_ID}` +
       `&response_type=code` +
@@ -245,13 +304,36 @@ async function connectSpotify() {
       `&code_challenge_method=S256` +
       `&code_challenge=${codeChallenge}` +
       `&show_dialog=true`;
-    
+
     console.log('🌐 Ouverture navigateur...');
     window.open(authUrl, '_blank');
   } catch (error) {
     console.error('❌ Erreur PKCE:', error);
     alert('Erreur lors de la préparation de la connexion');
     state.isWaitingForAuth = false;
+  }
+}
+
+function logout() {
+  if (confirm('Êtes-vous sûr de vouloir vous déconnecter ?')) {
+    // Nettoyer le localStorage
+    localStorage.removeItem('spotify_token');
+    localStorage.removeItem('spotify_user');
+    localStorage.removeItem('token_expiry');
+    localStorage.removeItem('refresh_token');
+
+    // Réinitialiser l'état
+    state.token = null;
+    state.user = null;
+    state.playlists = [];
+    state.selectedPlaylist = null;
+    state.tracks = [];
+    state.selectedTracks = new Set();
+    state.searchQuery = '';
+    state.view = 'auth';
+
+    console.log('👋 Déconnexion réussie');
+    render();
   }
 }
 
@@ -402,26 +484,23 @@ function toggleTrack(trackId) {
   } else {
     state.selectedTracks.add(trackId);
   }
-  
+
   // Mise à jour dynamique sans re-render complet
   const checkbox = document.querySelector(`[data-track-id="${trackId}"]`);
   if (checkbox) {
-    checkbox.textContent = state.selectedTracks.has(trackId) ? '☑️' : '☐';
-    checkbox.closest('div').style.background = state.selectedTracks.has(trackId) ? 
-      'rgba(16,185,129,0.2)' : 'rgba(255,255,255,0.05)';
-    checkbox.closest('div').style.border = state.selectedTracks.has(trackId) ? 
-      '2px solid #10b981' : '2px solid transparent';
-  }
-  
-  updateSelectionCounter();
-  
-  // Scroll smooth vers le haut
-  setTimeout(() => {
-    const tracksList = document.querySelector('[data-tracks-list]');
-    if (tracksList) {
-      tracksList.scrollTo({ top: 0, behavior: 'smooth' });
+    const isSelected = state.selectedTracks.has(trackId);
+    checkbox.innerHTML = `<i class="fa-${isSelected ? 'solid' : 'regular'} fa-square-check"></i>`;
+    const trackItem = checkbox.closest('.track-item');
+    if (trackItem) {
+      if (isSelected) {
+        trackItem.classList.add('selected');
+      } else {
+        trackItem.classList.remove('selected');
+      }
     }
-  }, 100);
+  }
+
+  updateSelectionCounter();
 }
 
 function updateSelectionCounter() {
@@ -431,14 +510,13 @@ function updateSelectionCounter() {
   }
   const createBtn = document.querySelector('[data-create-btn]');
   if (createBtn) {
-    createBtn.textContent = `Créer playlist (${state.selectedTracks.size})`;
+    createBtn.innerHTML = `<i class="fa-solid fa-plus"></i> Créer playlist (${state.selectedTracks.size})`;
     createBtn.disabled = state.selectedTracks.size === 0;
-    createBtn.style.opacity = state.selectedTracks.size === 0 ? '0.5' : '1';
   }
   const toggleAllBtn = document.querySelector('[data-toggle-all]');
   if (toggleAllBtn) {
-    toggleAllBtn.innerHTML = state.selectedTracks.size === state.tracks.length ? 
-      '☑️ Tout désélectionner' : '☐ Tout sélectionner';
+    const allSelected = state.selectedTracks.size === state.tracks.length;
+    toggleAllBtn.innerHTML = `<i class="fa-${allSelected ? 'solid' : 'regular'} fa-square-check"></i> ${allSelected ? 'Tout désélectionner' : 'Tout sélectionner'}`;
   }
 }
 
@@ -454,41 +532,40 @@ function toggleAllTracks() {
 function handleSearchInput(event) {
   state.searchQuery = event.target.value;
   const cursorPosition = event.target.selectionStart;
-  
+
   const container = document.querySelector('[data-playlists-container]');
   if (!container) return;
-  
-  const filteredPlaylists = state.playlists.filter(p => 
+
+  const filteredPlaylists = state.playlists.filter(p =>
     p.name.toLowerCase().includes(state.searchQuery.toLowerCase())
   );
-  
+
   container.innerHTML = filteredPlaylists.map(playlist => `
-    <div style="position: relative; width: 100%; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; overflow: hidden;">
+    <div class="playlist-card">
       <button
         onclick='selectPlaylist(${JSON.stringify(playlist).replace(/'/g, "\\'")})'
-        style="flex: 1; background: none; border: none; padding: 16px; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 16px;"
+        style="flex: 1; background: none; border: none; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 16px; padding: 0;"
       >
         ${playlist.images && playlist.images[0] ?
-          `<img src="${playlist.images[0].url}" style="width: 64px; height: 64px; border-radius: 8px;" />` :
-          `<div style="width: 64px; height: 64px; background: rgba(16,185,129,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center;"><span style="font-size: 32px;">🎵</span></div>`
+          `<img src="${playlist.images[0].url}" class="playlist-cover" />` :
+          `<div class="playlist-cover-placeholder"><i class="fa-solid fa-music"></i></div>`
         }
-        <div style="flex: 1;">
-          <h3 style="color: white; font-weight: 600; margin-bottom: 4px;">${playlist.name}</h3>
-          <p style="color: rgba(255,255,255,0.6); font-size: 14px;">${playlist.tracks.total} pistes</p>
+        <div class="playlist-info">
+          <div class="playlist-name">${playlist.name}</div>
+          <div class="playlist-meta">${playlist.tracks.total} pistes</div>
         </div>
       </button>
       <button
         onclick="event.stopPropagation(); deletePlaylist('${playlist.id}', '${playlist.name.replace(/'/g, "\\'")}');"
-        style="background: rgba(239,68,68,0.2); color: rgba(254,202,202,1); padding: 12px; border: none; cursor: pointer; margin-right: 16px; border-radius: 8px; transition: all 0.2s;"
-        onmouseover="this.style.background='rgba(239,68,68,0.4)'"
-        onmouseout="this.style.background='rgba(239,68,68,0.2)'"
+        class="btn btn-icon"
+        style="background: rgba(239,68,68,0.1); color: #dc2626;"
         title="Supprimer cette playlist de Spotify"
       >
-        🗑️
+        <i class="fa-solid fa-trash"></i>
       </button>
     </div>
   `).join('');
-  
+
   setTimeout(() => {
     const input = document.querySelector('[data-search-input]');
     if (input) {
@@ -617,18 +694,87 @@ function copyToClipboard() {
 // Render
 function render() {
   const app = document.getElementById('app');
-  
-  if (state.view === 'auth') {
+
+  if (state.view === 'setup') {
     app.innerHTML = `
-      <div style="min-height: 100vh; background: linear-gradient(to bottom right, #064e3b, #065f46, #0d9488); display: flex; align-items: center; justify-content: center; padding: 24px;">
-        <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(16px); border-radius: 24px; padding: 48px; max-width: 448px; width: 100%; text-align: center;">
-          <div style="width: 80px; height: 80px; background: #10b981; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 24px;">
-            <span style="font-size: 40px;">🎵</span>
+      <div class="auth-container">
+        <div class="auth-card" style="text-align: left;">
+          <div style="text-align: center; margin-bottom: 24px;">
+            <div class="auth-icon" style="background: var(--warning); margin: 0 auto 16px;">
+              <i class="fa-solid fa-gear"></i>
+            </div>
+            <h1>Configuration requise</h1>
+            <p class="text-secondary">Configurez votre application Spotify pour continuer</p>
           </div>
-          <h1 style="font-size: 30px; font-weight: bold; color: white; margin-bottom: 12px;">Spotify Playlist Manager</h1>
-          <p style="color: rgba(255,255,255,0.7); margin-bottom: 32px;">Créez de nouvelles playlists à partir de vos morceaux favoris</p>
-          <button onclick="connectSpotify()" style="width: 100%; background: #10b981; color: white; font-weight: 600; padding: 16px 24px; border-radius: 12px; border: none; cursor: pointer; font-size: 16px;">
-            Se connecter avec Spotify
+
+          <div class="alert alert-warning mb-lg">
+            <p style="font-weight: 600; margin-bottom: 8px;"><i class="fa-solid fa-circle-info"></i> Informations requises</p>
+            <p class="text-small">Pour utiliser cette application, vous devez créer une application Spotify et obtenir un <strong>Client ID</strong>.</p>
+          </div>
+
+          <div class="mb-lg">
+            <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+              <i class="fa-solid fa-key"></i> Spotify Client ID
+            </label>
+            <input
+              type="text"
+              placeholder="Exemple: 1a2b3c4d5e6f7g8h9i0j"
+              value="${state.setupClientId}"
+              oninput="state.setupClientId = this.value;"
+              style="font-family: monospace;"
+            />
+            <p class="text-small mt-sm" style="color: var(--text-tertiary);">
+              Votre identifiant unique d'application Spotify
+            </p>
+          </div>
+
+          <div class="mb-xl" style="background: var(--khaki-light); padding: 16px; border-radius: var(--radius-md); border-left: 4px solid var(--cal-poly-green);">
+            <p style="font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">
+              <i class="fa-solid fa-circle-info"></i> Comment obtenir votre Client ID ?
+            </p>
+            <ol style="margin-left: 20px; font-size: 14px; color: var(--text-secondary); line-height: 1.8;">
+              <li>Rendez-vous sur <a href="https://developer.spotify.com/dashboard" target="_blank" style="color: var(--cal-poly-green); font-weight: 500;">Spotify Developer Dashboard</a></li>
+              <li>Connectez-vous avec votre compte Spotify</li>
+              <li>Cliquez sur <strong>"Create app"</strong></li>
+              <li>Remplissez les informations :
+                <ul style="margin-left: 20px; margin-top: 4px;">
+                  <li><strong>App name</strong> : Spotify Playlist Manager</li>
+                  <li><strong>App description</strong> : Gestionnaire de playlists</li>
+                  <li><strong>Redirect URI</strong> : <code style="background: rgba(0,0,0,0.1); padding: 2px 6px; border-radius: 4px; font-size: 13px;">http://127.0.0.1:8888/callback</code></li>
+                  <li><strong>API</strong> : Cochez "Web API"</li>
+                </ul>
+              </li>
+              <li>Acceptez les conditions et cliquez sur <strong>"Save"</strong></li>
+              <li>Cliquez sur <strong>"Settings"</strong></li>
+              <li>Copiez le <strong>Client ID</strong> et collez-le ci-dessus</li>
+            </ol>
+          </div>
+
+          <div style="text-align: center;">
+            <button onclick="saveConfig()" class="btn btn-primary" style="width: 100%; max-width: 400px;">
+              <i class="fa-solid fa-floppy-disk"></i> Sauvegarder et continuer
+            </button>
+
+            <div class="mt-md">
+              <a href="https://developer.spotify.com/documentation/web-api" target="_blank" class="text-small" style="color: var(--cal-poly-green);">
+                <i class="fa-solid fa-book"></i> Documentation complète
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  } else if (state.view === 'auth') {
+    app.innerHTML = `
+      <div class="auth-container">
+        <div class="auth-card">
+          <div class="auth-icon">
+            <i class="fa-solid fa-music"></i>
+          </div>
+          <h1>Spotify Playlist Manager</h1>
+          <p class="text-secondary mb-xl">Créez de nouvelles playlists à partir de vos morceaux favoris</p>
+          <button onclick="connectSpotify()" class="btn btn-primary" style="width: 100%;">
+            <i class="fa-brands fa-spotify"></i> Se connecter avec Spotify
           </button>
         </div>
       </div>
@@ -639,123 +785,127 @@ function render() {
     );
 
     app.innerHTML = `
-      <div style="min-height: 100vh; background: linear-gradient(to bottom right, #064e3b, #065f46, #0d9488); padding: 24px;">
-        <div style="max-width: 1152px; margin: 0 auto;">
-          <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(16px); border-radius: 24px; padding: 32px;">
-            <div style="display: flex; align-items: center; justify-between; margin-bottom: 32px;">
+      <div class="page-wrapper">
+        <div class="container">
+          <div class="card">
+            <div class="flex items-center justify-between mb-xl">
               <div>
-                <h1 style="font-size: 30px; font-weight: bold; color: white; margin-bottom: 8px;">Mes Playlists</h1>
-                <p style="color: rgba(255,255,255,0.7);">Connecté en tant que ${state.user?.display_name}</p>
+                <h1>Mes Playlists</h1>
+                <p class="text-secondary">Connecté en tant que ${state.user?.display_name}</p>
               </div>
-              <div style="display: flex; align-items: center; gap: 12px;">
+              <div class="flex gap-sm">
                 <button
                   onclick="state.showHistory = !state.showHistory; render();"
-                  style="background: rgba(255,255,255,0.1); color: white; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 8px;"
+                  class="btn btn-secondary"
                 >
-                  🕐 Historique (${state.playlistHistory.length})
+                  <i class="fa-solid fa-clock-rotate-left"></i> Historique (${state.playlistHistory.length})
+                </button>
+                <button
+                  onclick="logout();"
+                  class="btn btn-secondary"
+                  title="Se déconnecter"
+                >
+                  <i class="fa-solid fa-arrow-right-from-bracket"></i> Déconnexion
                 </button>
               </div>
             </div>
 
             ${state.pendingCheckpoint && state.pendingCheckpoint.status !== 'completed' ? `
-              <div style="background: rgba(245,158,11,0.2); border: 1px solid rgba(245,158,11,0.5); border-radius: 12px; padding: 16px; margin-bottom: 24px;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+              <div class="alert alert-warning">
+                <div class="flex justify-between mb-sm">
                   <div>
-                    <p style="color: rgba(254,243,199,1); font-weight: 600; margin-bottom: 4px;">⚠️ Création interrompue</p>
-                    <p style="color: rgba(254,243,199,0.8); font-size: 14px; margin-bottom: 8px;">La playlist "${state.pendingCheckpoint.playlistName}" n'a pas été terminée</p>
-                    <div style="display: flex; gap: 8px; font-size: 14px;">
-                      <div style="background: rgba(245,158,11,0.3); padding: 4px 8px; border-radius: 4px; color: rgba(254,243,199,1);">
+                    <p style="font-weight: 600; margin-bottom: 4px;"><i class="fa-solid fa-triangle-exclamation"></i> Création interrompue</p>
+                    <p class="text-small mb-sm">La playlist "${state.pendingCheckpoint.playlistName}" n'a pas été terminée</p>
+                    <div class="flex gap-sm text-small">
+                      <span class="badge badge-warning">
                         ${state.pendingCheckpoint.tracksAdded}/${state.pendingCheckpoint.totalTracks} morceaux ajoutés
-                      </div>
-                      <div style="color: rgba(254,243,199,0.7);">
+                      </span>
+                      <span style="opacity: 0.7;">
                         ${new Date(state.pendingCheckpoint.timestamp).toLocaleString('fr-FR')}
-                      </div>
+                      </span>
                     </div>
                   </div>
-                  <button onclick="clearCheckpoint(); render();" style="color: rgba(254,243,199,1); background: none; border: none; cursor: pointer; font-size: 18px;">✕</button>
+                  <button onclick="clearCheckpoint(); render();" class="btn btn-icon" style="background: none; color: inherit;"><i class="fa-solid fa-xmark"></i></button>
                 </div>
                 ${state.pendingCheckpoint.playlistUrl ? `
-                  <div style="display: flex; gap: 8px; padding-top: 12px; border-top: 1px solid rgba(245,158,11,0.3);">
-                    <a href="${state.pendingCheckpoint.playlistUrl}" target="_blank" style="flex: 1; background: rgba(245,158,11,1); color: white; padding: 8px 16px; border-radius: 8px; text-align: center; text-decoration: none; font-size: 14px;">
-                      🔗 Voir la playlist
+                  <div class="flex gap-sm mt-md" style="padding-top: 12px; border-top: 1px solid rgba(245,158,11,0.3);">
+                    <a href="${state.pendingCheckpoint.playlistUrl}" target="_blank" class="btn btn-primary" style="flex: 1;">
+                      <i class="fa-solid fa-link"></i> Voir la playlist
                     </a>
                     <button
                       onclick="saveToHistory({id: state.pendingCheckpoint.playlistId, name: state.pendingCheckpoint.playlistName, url: state.pendingCheckpoint.playlistUrl, trackCount: state.pendingCheckpoint.tracksAdded, sourcePlaylist: state.pendingCheckpoint.sourcePlaylist.name, isPublic: state.pendingCheckpoint.isPublic}); clearCheckpoint(); render();"
-                      style="background: rgba(245,158,11,0.3); color: rgba(254,243,199,1); padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 14px;"
+                      class="btn btn-ghost"
                     >
-                      💾 Sauvegarder et ignorer
+                      <i class="fa-solid fa-floppy-disk"></i> Sauvegarder et ignorer
                     </button>
                   </div>
                 ` : ''}
               </div>
             ` : ''}
-            
-            <div style="margin-bottom: 24px;">
+
+            <div class="mb-lg">
               <input
-                type="text"
+                type="search"
                 data-search-input
                 placeholder="Rechercher une playlist..."
                 value="${state.searchQuery}"
-                style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 12px 16px; color: white; font-size: 16px;"
               />
             </div>
 
             ${state.showHistory ? `
-              <div style="margin-bottom: 24px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-                  <h2 style="color: white; font-size: 20px; font-weight: 600; display: flex; align-items: center; gap: 8px;">
-                    📜 Historique des playlists créées
-                  </h2>
-                  <button onclick="state.showHistory = false; render();" style="color: rgba(255,255,255,0.7); background: none; border: none; cursor: pointer;">✕ Fermer</button>
+              <div class="mb-lg">
+                <div class="flex justify-between items-center mb-md">
+                  <h2><i class="fa-solid fa-clock-rotate-left"></i> Historique des playlists créées</h2>
+                  <button onclick="state.showHistory = false; render();" class="btn btn-ghost"><i class="fa-solid fa-xmark"></i> Fermer</button>
                 </div>
 
                 ${state.playlistHistory.length === 0 ? `
-                  <div style="text-align: center; padding: 48px; color: rgba(255,255,255,0.5);">
-                    <div style="font-size: 48px; margin-bottom: 12px;">🕐</div>
-                    <p>Aucune playlist créée pour le moment</p>
+                  <div class="text-center" style="padding: 48px;">
+                    <i class="fa-solid fa-clock-rotate-left" style="font-size: 48px; margin-bottom: 12px; opacity: 0.5;"></i>
+                    <p class="text-secondary">Aucune playlist créée pour le moment</p>
                   </div>
                 ` : `
-                  <div style="max-height: 600px; overflow-y: auto;">
+                  <div class="max-h-600 overflow-auto">
                     ${state.playlistHistory.map((item) => `
-                      <div style="background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 16px; margin-bottom: 12px;">
-                        <div style="display: flex; gap: 16px;">
+                      <div class="history-item">
+                        <div class="flex gap-md">
                           ${item.lastTrack && item.lastTrack.image ? `
-                            <img src="${item.lastTrack.image}" style="width: 80px; height: 80px; border-radius: 8px; object-fit: cover;" alt="Cover" />
+                            <img src="${item.lastTrack.image}" class="history-cover" alt="Cover" />
                           ` : `
-                            <div style="width: 80px; height: 80px; background: rgba(16,185,129,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center;">
-                              <span style="font-size: 32px;">🎵</span>
+                            <div class="playlist-cover-placeholder" style="width: 80px; height: 80px;">
+                              <i class="fa-solid fa-music" style="font-size: 32px;"></i>
                             </div>
                           `}
                           <div style="flex: 1;">
-                            <h3 style="color: white; font-weight: 600; margin-bottom: 4px;">${item.name}</h3>
-                            <p style="color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 8px;">
+                            <h3>${item.name}</h3>
+                            <p class="text-secondary text-small mb-sm">
                               ${item.trackCount} pistes • Depuis "${item.sourcePlaylist}"
                             </p>
                             ${item.lastTrack ? `
-                              <p style="color: rgba(255,255,255,0.5); font-size: 13px; margin-bottom: 4px;">
-                                <span style="color: rgba(255,255,255,0.4);">Dernier morceau :</span> ${item.lastTrack.name}
+                              <p class="text-small" style="color: var(--text-tertiary); margin-bottom: 4px;">
+                                <span style="opacity: 0.7;">Dernier morceau :</span> ${item.lastTrack.name}
                               </p>
-                              <p style="color: rgba(255,255,255,0.4); font-size: 12px; margin-bottom: 8px;">
+                              <p class="text-small mb-sm" style="color: var(--text-tertiary); opacity: 0.7;">
                                 ${item.lastTrack.artist}${item.lastTrack.album ? ' • ' + item.lastTrack.album : ''}
                               </p>
                             ` : ''}
-                            <p style="color: rgba(255,255,255,0.4); font-size: 12px;">
+                            <p class="text-small" style="color: var(--text-tertiary);">
                               ${new Date(item.createdAt).toLocaleString('fr-FR')} • ${item.isPublic ? 'Publique' : 'Privée'}
                             </p>
                           </div>
-                          <div style="display: flex; gap: 8px; align-items: flex-start;">
-                            <a href="${item.url}" target="_blank" style="background: #10b981; color: white; padding: 8px 12px; border-radius: 8px; text-decoration: none; display: flex; align-items: center; justify-content: center;" title="Ouvrir dans Spotify">
-                              🔗
+                          <div class="flex gap-sm" style="align-items: flex-start;">
+                            <a href="${item.url}" target="_blank" class="btn btn-primary btn-icon" title="Ouvrir dans Spotify">
+                              <i class="fa-solid fa-link"></i>
                             </a>
-                            <button onclick="navigator.clipboard.writeText('${item.url}'); alert('Lien copié !');" style="background: rgba(255,255,255,0.1); color: white; padding: 8px 12px; border-radius: 8px; border: none; cursor: pointer;" title="Copier le lien">
-                              📋
+                            <button onclick="navigator.clipboard.writeText('${item.url}'); alert('Lien copié !');" class="btn btn-ghost btn-icon" title="Copier le lien">
+                              <i class="fa-solid fa-copy"></i>
                             </button>
                             <button
                               onclick="if(confirm('Supprimer cette playlist de l\\'historique ?\\n\\nCela ne supprimera PAS la playlist de Spotify, seulement de l\\'historique local.')) { deleteFromHistory('${item.id}'); }"
-                              style="background: rgba(239,68,68,0.2); color: rgba(254,202,202,1); padding: 8px 12px; border-radius: 8px; border: none; cursor: pointer; hover: background: rgba(239,68,68,0.3);"
+                              class="btn btn-icon" style="background: rgba(239,68,68,0.1); color: #dc2626;"
                               title="Supprimer de l'historique"
                             >
-                              🗑️
+                              <i class="fa-solid fa-trash"></i>
                             </button>
                           </div>
                         </div>
@@ -766,32 +916,31 @@ function render() {
               </div>
             ` : ''}
 
-            <div style="max-height: 600px; overflow-y: auto;" data-playlists-container>
-              ${state.loading ? 
-                '<div style="display: flex; align-items: center; justify-content: center; padding: 48px;"><div style="color: white; font-size: 18px;">⏳ Chargement des playlists...</div></div>' :
+            <div class="max-h-600 overflow-auto" data-playlists-container>
+              ${state.loading ?
+                '<div class="loading-container"><p class="text-secondary"><i class="fa-solid fa-spinner fa-spin"></i> Chargement des playlists...</p></div>' :
                 filteredPlaylists.map(playlist => `
-                  <div style="position: relative; width: 100%; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; overflow: hidden;">
+                  <div class="playlist-card">
                     <button
                       onclick='selectPlaylist(${JSON.stringify(playlist).replace(/'/g, "\\'")})'
-                      style="flex: 1; background: none; border: none; padding: 16px; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 16px;"
+                      style="flex: 1; background: none; border: none; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 16px; padding: 0;"
                     >
                       ${playlist.images && playlist.images[0] ?
-                        `<img src="${playlist.images[0].url}" style="width: 64px; height: 64px; border-radius: 8px;" />` :
-                        `<div style="width: 64px; height: 64px; background: rgba(16,185,129,0.2); border-radius: 8px; display: flex; align-items: center; justify-content: center;"><span style="font-size: 32px;">🎵</span></div>`
+                        `<img src="${playlist.images[0].url}" class="playlist-cover" />` :
+                        `<div class="playlist-cover-placeholder"><i class="fa-solid fa-music"></i></div>`
                       }
-                      <div style="flex: 1;">
-                        <h3 style="color: white; font-weight: 600; margin-bottom: 4px;">${playlist.name}</h3>
-                        <p style="color: rgba(255,255,255,0.6); font-size: 14px;">${playlist.tracks.total} pistes</p>
+                      <div class="playlist-info">
+                        <div class="playlist-name">${playlist.name}</div>
+                        <div class="playlist-meta">${playlist.tracks.total} pistes</div>
                       </div>
                     </button>
                     <button
                       onclick="event.stopPropagation(); deletePlaylist('${playlist.id}', '${playlist.name.replace(/'/g, "\\'")}');"
-                      style="background: rgba(239,68,68,0.2); color: rgba(254,202,202,1); padding: 12px; border: none; cursor: pointer; margin-right: 16px; border-radius: 8px; transition: all 0.2s;"
-                      onmouseover="this.style.background='rgba(239,68,68,0.4)'"
-                      onmouseout="this.style.background='rgba(239,68,68,0.2)'"
+                      class="btn btn-icon"
+                      style="background: rgba(239,68,68,0.1); color: #dc2626;"
                       title="Supprimer cette playlist de Spotify"
                     >
-                      🗑️
+                      <i class="fa-solid fa-trash"></i>
                     </button>
                   </div>
                 `).join('')
@@ -808,43 +957,43 @@ function render() {
     }
   } else if (state.view === 'tracks') {
     app.innerHTML = `
-      <div style="min-height: 100vh; background: linear-gradient(to bottom right, #064e3b, #065f46, #0d9488); padding: 24px;">
-        <div style="max-width: 1152px; margin: 0 auto;">
-          <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(16px); border-radius: 24px; padding: 32px;">
-            <button onclick="state.view='playlists'; render();" style="color: rgba(255,255,255,0.7); background: none; border: none; cursor: pointer; margin-bottom: 8px; font-size: 14px;">← Retour aux playlists</button>
-            <h1 style="font-size: 30px; font-weight: bold; color: white; margin-bottom: 8px;">${state.selectedPlaylist?.name}</h1>
-            <p style="color: rgba(255,255,255,0.7); margin-bottom: 24px;">${state.tracks.length} pistes disponibles</p>
-            
-            <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between;">
-              <div style="display: flex; align-items: center; gap: 16px;">
-                <button onclick="toggleAllTracks()" data-toggle-all style="color: white; background: none; border: none; cursor: pointer;">
-                  ${state.selectedTracks.size === state.tracks.length ? '☑️' : '☐'} ${state.selectedTracks.size === state.tracks.length ? 'Tout désélectionner' : 'Tout sélectionner'}
+      <div class="page-wrapper">
+        <div class="container">
+          <div class="card">
+            <button onclick="state.view='playlists'; render();" class="btn btn-ghost mb-sm"><i class="fa-solid fa-arrow-left"></i> Retour aux playlists</button>
+            <h1>${state.selectedPlaylist?.name}</h1>
+            <p class="text-secondary mb-lg">${state.tracks.length} pistes disponibles</p>
+
+            <div class="card mb-lg" style="padding: 16px;">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-md">
+                  <button onclick="toggleAllTracks()" data-toggle-all class="btn btn-ghost">
+                    <i class="fa-${state.selectedTracks.size === state.tracks.length ? 'solid' : 'regular'} fa-square-check"></i> ${state.selectedTracks.size === state.tracks.length ? 'Tout désélectionner' : 'Tout sélectionner'}
+                  </button>
+                  <span class="text-secondary" data-selection-counter>${state.selectedTracks.size} piste(s) sélectionnée(s)</span>
+                </div>
+                <button
+                  onclick="state.view='creating'; render();"
+                  data-create-btn
+                  ${state.selectedTracks.size === 0 ? 'disabled' : ''}
+                  class="btn btn-primary"
+                >
+                  <i class="fa-solid fa-plus"></i> Créer playlist (${state.selectedTracks.size})
                 </button>
-                <span style="color: rgba(255,255,255,0.7);" data-selection-counter>${state.selectedTracks.size} piste(s) sélectionnée(s)</span>
               </div>
-              <button 
-                onclick="state.view='creating'; render();" 
-                data-create-btn
-                ${state.selectedTracks.size === 0 ? 'disabled' : ''}
-                style="background: #10b981; color: white; font-weight: 600; padding: 8px 24px; border-radius: 8px; border: none; cursor: pointer; ${state.selectedTracks.size === 0 ? 'opacity: 0.5; cursor: not-allowed;' : ''}"
-              >
-                Créer playlist (${state.selectedTracks.size})
-              </button>
             </div>
-            
+
             <div style="max-height: 500px; overflow-y: auto;" data-tracks-list>
               ${state.tracks.map(item => `
-                <div 
+                <div
                   onclick="toggleTrack('${item.track.id}')"
-                  style="padding: 16px; border-radius: 8px; margin-bottom: 8px; cursor: pointer; ${state.selectedTracks.has(item.track.id) ? 'background: rgba(16,185,129,0.2); border: 2px solid #10b981;' : 'background: rgba(255,255,255,0.05); border: 2px solid transparent;'}"
+                  class="track-item ${state.selectedTracks.has(item.track.id) ? 'selected' : ''}"
                 >
-                  <div style="display: flex; align-items: center; gap: 16px;">
-                    <span data-track-id="${item.track.id}">${state.selectedTracks.has(item.track.id) ? '☑️' : '☐'}</span>
-                    ${item.track.album?.images[0] ? `<img src="${item.track.album.images[0].url}" style="width: 48px; height: 48px; border-radius: 4px;" />` : ''}
-                    <div style="flex: 1; min-width: 0;">
-                      <div style="color: white; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${item.track.name}</div>
-                      <div style="color: rgba(255,255,255,0.7); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${item.track.artists.map(a => a.name).join(', ')} • ${item.track.album?.name}</div>
-                    </div>
+                  <span class="track-checkbox" data-track-id="${item.track.id}"><i class="fa-${state.selectedTracks.has(item.track.id) ? 'solid' : 'regular'} fa-square-check"></i></span>
+                  ${item.track.album?.images[0] ? `<img src="${item.track.album.images[0].url}" class="track-cover" />` : ''}
+                  <div class="track-info">
+                    <div class="track-name">${item.track.name}</div>
+                    <div class="track-artist">${item.track.artists.map(a => a.name).join(', ')} • ${item.track.album?.name}</div>
                   </div>
                 </div>
               `).join('')}
@@ -856,48 +1005,47 @@ function render() {
   } else if (state.view === 'creating') {
     if (!state.createdPlaylistUrl) {
       app.innerHTML = `
-        <div style="min-height: 100vh; background: linear-gradient(to bottom right, #064e3b, #065f46, #0d9488); display: flex; align-items: center; justify-content: center; padding: 24px;">
-          <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(16px); border-radius: 24px; padding: 48px; max-width: 448px; width: 100%;">
-            <h2 style="font-size: 24px; font-weight: bold; color: white; margin-bottom: 24px; text-align: center;">Création de la playlist</h2>
-            
-            <div style="margin-bottom: 24px;">
-              <label style="display: block; color: rgba(255,255,255,0.9); margin-bottom: 8px; font-size: 14px;">Nom de la playlist</label>
-              <input 
-                type="text" 
-                value="${state.newPlaylistName}" 
+        <div class="auth-container">
+          <div class="auth-card">
+            <h2 class="text-center">Création de la playlist</h2>
+
+            <div class="mb-lg">
+              <label style="display: block; margin-bottom: 8px;" class="text-small">Nom de la playlist</label>
+              <input
+                type="text"
+                value="${state.newPlaylistName}"
                 oninput="state.newPlaylistName = this.value;"
-                style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; padding: 12px 16px; color: white; font-size: 16px;"
               />
             </div>
-            
-            <div style="margin-bottom: 32px;">
-              <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; color: white;">
-                <input type="checkbox" ${state.isPublic ? 'checked' : ''} onchange="state.isPublic = this.checked;" style="width: 20px; height: 20px;" />
+
+            <div class="mb-xl">
+              <label style="display: flex; align-items: center; gap: 12px; cursor: pointer;">
+                <input type="checkbox" ${state.isPublic ? 'checked' : ''} onchange="state.isPublic = this.checked;" />
                 <span>Playlist publique</span>
               </label>
             </div>
-            
+
             ${state.progress.total > 0 ? `
-              <div style="margin-bottom: 24px;">
-                <div style="display: flex; justify-content: space-between; color: rgba(255,255,255,0.7); font-size: 14px; margin-bottom: 8px;">
-                  <span>⏳ Ajout des pistes... (checkpoint automatique)</span>
+              <div class="mb-lg">
+                <div class="flex justify-between text-secondary text-small mb-sm">
+                  <span><i class="fa-solid fa-spinner fa-spin"></i> Ajout des pistes... (checkpoint automatique)</span>
                   <span>${state.progress.current} / ${state.progress.total}</span>
                 </div>
-                <div style="width: 100%; background: rgba(255,255,255,0.1); border-radius: 9999px; height: 8px; margin-bottom: 8px;">
-                  <div style="background: #10b981; height: 8px; border-radius: 9999px; width: ${(state.progress.current / state.progress.total) * 100}%;"></div>
+                <div class="progress-bar mb-sm">
+                  <div class="progress-fill" style="width: ${(state.progress.current / state.progress.total) * 100}%;"></div>
                 </div>
-                <p style="color: rgba(255,255,255,0.5); font-size: 12px;">
-                  ℹ️ Votre progression est sauvegardée automatiquement
+                <p class="text-small" style="color: var(--text-tertiary);">
+                  <i class="fa-solid fa-circle-info"></i> Votre progression est sauvegardée automatiquement
                 </p>
               </div>
             ` : ''}
-            
-            <div style="display: flex; gap: 12px;">
-              <button onclick="state.view='tracks'; render();" style="flex: 1; background: rgba(255,255,255,0.1); color: white; font-weight: 600; padding: 12px 24px; border-radius: 8px; border: none; cursor: pointer; font-size: 16px;">
-                Annuler
+
+            <div class="flex gap-sm">
+              <button onclick="state.view='tracks'; render();" class="btn btn-secondary" style="flex: 1;">
+                <i class="fa-solid fa-xmark"></i> Annuler
               </button>
-              <button onclick="createPlaylist()" ${state.progress.total > 0 ? 'disabled' : ''} style="flex: 1; background: #10b981; color: white; font-weight: 600; padding: 12px 24px; border-radius: 8px; border: none; cursor: pointer; font-size: 16px; ${state.progress.total > 0 ? 'opacity: 0.5; cursor: not-allowed;' : ''}">
-                ${state.progress.total > 0 ? 'Création...' : 'Créer'}
+              <button onclick="createPlaylist()" ${state.progress.total > 0 ? 'disabled' : ''} class="btn btn-primary" style="flex: 1;">
+                ${state.progress.total > 0 ? '<i class="fa-solid fa-spinner fa-spin"></i> Création...' : '<i class="fa-solid fa-plus"></i> Créer'}
               </button>
             </div>
           </div>
@@ -905,31 +1053,31 @@ function render() {
       `;
     } else {
       app.innerHTML = `
-        <div style="min-height: 100vh; background: linear-gradient(to bottom right, #064e3b, #065f46, #0d9488); display: flex; align-items: center; justify-content: center; padding: 24px;">
-          <div style="background: rgba(255,255,255,0.1); backdrop-filter: blur(16px); border-radius: 24px; padding: 48px; max-width: 448px; width: 100%; text-align: center;">
-            <div style="width: 80px; height: 80px; background: #10b981; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 24px;">
-              <span style="font-size: 40px;">🎵</span>
+        <div class="auth-container">
+          <div class="auth-card">
+            <div class="auth-icon">
+              <i class="fa-solid fa-circle-check"></i>
             </div>
-            <h2 style="font-size: 30px; font-weight: bold; color: white; margin-bottom: 12px;">Playlist créée ! 🎉</h2>
-            <p style="color: rgba(255,255,255,0.7); margin-bottom: 32px;">
+            <h2 class="text-center">Playlist créée !</h2>
+            <p class="text-secondary mb-xl">
               Votre playlist "${state.newPlaylistName}" contient ${state.selectedTracks.size} piste(s)
             </p>
-            
-            <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px; margin-bottom: 24px; word-break: break-all; color: rgba(255,255,255,0.9); font-size: 14px;">
+
+            <div class="card mb-lg" style="padding: 16px; word-break: break-all; font-size: 14px;">
               ${state.createdPlaylistUrl}
             </div>
-            
-            <div style="display: flex; gap: 12px; margin-bottom: 16px;">
-              <button onclick="copyToClipboard()" style="flex: 1; background: rgba(255,255,255,0.1); color: white; font-weight: 600; padding: 12px 24px; border-radius: 8px; border: none; cursor: pointer; font-size: 16px;">
-                📋 Copier
+
+            <div class="flex gap-sm mb-md">
+              <button onclick="copyToClipboard()" class="btn btn-secondary" style="flex: 1;">
+                <i class="fa-solid fa-copy"></i> Copier
               </button>
-              <a href="${state.createdPlaylistUrl}" target="_blank" style="flex: 1; background: #10b981; color: white; font-weight: 600; padding: 12px 24px; border-radius: 8px; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 16px;">
-                🔗 Ouvrir
+              <a href="${state.createdPlaylistUrl}" target="_blank" class="btn btn-primary" style="flex: 1;">
+                <i class="fa-solid fa-link"></i> Ouvrir
               </a>
             </div>
-            
-            <button onclick="state.view='playlists'; state.createdPlaylistUrl=null; state.selectedTracks=new Set(); render();" style="width: 100%; background: none; border: none; color: rgba(255,255,255,0.7); cursor: pointer; font-size: 16px;">
-              Retour aux playlists
+
+            <button onclick="state.view='playlists'; state.createdPlaylistUrl=null; state.selectedTracks=new Set(); render();" class="btn btn-ghost" style="width: 100%;">
+              <i class="fa-solid fa-arrow-left"></i> Retour aux playlists
             </button>
           </div>
         </div>

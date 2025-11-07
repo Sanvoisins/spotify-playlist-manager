@@ -2,11 +2,24 @@ const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const express = require('express');
 const fs = require('fs');
-require('dotenv').config();
+const dotenv = require('dotenv');
 
 let mainWindow;
 let server;
 let pendingCode = null;
+
+// Fonction pour charger la configuration depuis le bon emplacement
+function loadEnvConfig() {
+  const configDir = app.isPackaged ? app.getPath('userData') : __dirname;
+  const envPath = path.join(configDir, '.env');
+
+  if (fs.existsSync(envPath)) {
+    console.log('📄 Chargement config depuis:', envPath);
+    dotenv.config({ path: envPath });
+  } else {
+    console.log('⚠️ Aucun fichier .env trouvé dans:', envPath);
+  }
+}
 
 function startCallbackServer() {
   const expressApp = express();
@@ -56,16 +69,15 @@ function startCallbackServer() {
     
     if (code) {
       console.log('✅ Code d\'autorisation reçu sur le serveur');
-      
+
       pendingCode = code;
-      
-      if (mainWindow) {
-        mainWindow.webContents.executeJavaScript(`
-          console.log('Code reçu du serveur');
-          sessionStorage.setItem('spotify_auth_code', '${code}');
-        `);
+
+      // Envoyer le code directement à la fenêtre principale via IPC
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        console.log('📤 Envoi du code à la fenêtre principale');
+        mainWindow.webContents.send('spotify-auth-code', code);
       }
-      
+
       res.send(`
         <!DOCTYPE html>
         <html>
@@ -116,10 +128,48 @@ function startCallbackServer() {
   
   // Endpoint pour récupérer les variables d'environnement
   expressApp.get('/config', (req, res) => {
+    const clientId = process.env.SPOTIFY_CLIENT_ID;
+    const redirectUri = process.env.REDIRECT_URI || 'http://127.0.0.1:8888/callback';
+
     res.json({
-      clientId: process.env.SPOTIFY_CLIENT_ID,
-      redirectUri: process.env.REDIRECT_URI || 'http://127.0.0.1:8888/callback'
+      clientId: clientId || '',
+      redirectUri: redirectUri,
+      isConfigured: !!(clientId && clientId.trim() !== '')
     });
+  });
+
+  // Endpoint pour sauvegarder la configuration
+  expressApp.use(express.json());
+  expressApp.post('/save-config', (req, res) => {
+    const { clientId } = req.body;
+
+    if (!clientId || clientId.trim() === '') {
+      return res.status(400).json({ error: 'Client ID est requis' });
+    }
+
+    // Utiliser app.getPath('userData') pour un chemin accessible en mode production
+    const configDir = app.isPackaged ? app.getPath('userData') : __dirname;
+    const envPath = path.join(configDir, '.env');
+    const envContent = `SPOTIFY_CLIENT_ID=${clientId}\nREDIRECT_URI=http://127.0.0.1:8888/callback\n`;
+
+    try {
+      // Créer le dossier si nécessaire
+      if (!fs.existsSync(configDir)) {
+        fs.mkdirSync(configDir, { recursive: true });
+      }
+
+      fs.writeFileSync(envPath, envContent, 'utf8');
+
+      // Recharger les variables d'environnement
+      process.env.SPOTIFY_CLIENT_ID = clientId;
+      process.env.REDIRECT_URI = 'http://127.0.0.1:8888/callback';
+
+      console.log('✅ Configuration sauvegardée dans:', envPath);
+      res.json({ success: true, message: 'Configuration sauvegardée avec succès' });
+    } catch (error) {
+      console.error('❌ Erreur lors de la sauvegarde:', error);
+      res.status(500).json({ error: `Erreur lors de la sauvegarde: ${error.message}` });
+    }
   });
   
   server = expressApp.listen(8888, '127.0.0.1', () => {
@@ -157,6 +207,7 @@ function createWindow() {
 }
 
 app.on('ready', () => {
+  loadEnvConfig(); // Charger la config en premier
   startCallbackServer();
   createWindow();
 });
