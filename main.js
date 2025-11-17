@@ -4,6 +4,15 @@ const express = require('express');
 const fs = require('fs');
 const dotenv = require('dotenv');
 
+// Hot reload en développement
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    require('electron-reloader')(module);
+  } catch (e) {
+    console.log('⚠️ electron-reloader not available');
+  }
+}
+
 let mainWindow;
 let server;
 let pendingCode = null;

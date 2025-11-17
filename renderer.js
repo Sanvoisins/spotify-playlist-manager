@@ -159,6 +159,302 @@ function deleteFromHistory(playlistId) {
   }
 }
 
+// Détecter les playlists créées à partir d'autres playlists
+function detectPlaylistOrigins() {
+  const detected = [];
+  // Regex pour matcher le pattern: "New - [nom source] - [date] SPM" ou l'ancien sans SPM
+  const patternRegex = /^New - (.+) - (\d{4}-\d{2}-\d{2})( SPM)?$/;
+
+  state.playlists.forEach(playlist => {
+    const match = playlist.name.match(patternRegex);
+    if (match) {
+      const sourcePlaylistName = match[1];
+      // Vérifier que la playlist source existe
+      const sourcePlaylistExists = state.playlists.some(
+        p => p.name === sourcePlaylistName && p.id !== playlist.id
+      );
+
+      if (sourcePlaylistExists) {
+        detected.push({
+          playlist: playlist,
+          sourcePlaylistName: sourcePlaylistName,
+          createdDate: match[2]
+        });
+      }
+    }
+  });
+
+  return detected;
+}
+
+// Récupérer le dernier track d'une playlist
+async function getLastTrackFromPlaylist(playlistId) {
+  try {
+    const response = await fetch(
+      `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=1`,
+      {
+        headers: { 'Authorization': `Bearer ${state.token}` }
+      }
+    );
+    const data = await response.json();
+
+    if (data.items && data.items.length > 0) {
+      const item = data.items[0];
+      if (item.track) {
+        return {
+          id: item.track.id,
+          name: item.track.name,
+          artist: item.track.artists?.[0]?.name || 'Unknown',
+          album: item.track.album?.name || 'Unknown',
+          image: item.track.album?.images?.[0]?.url || null
+        };
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('❌ Erreur récupération dernier track:', error);
+    return null;
+  }
+}
+
+// Wrapper pour débugger et appeler goToParentPlaylist
+async function onParentPlaylistButtonClick(sourcePlaylistName, childLastTrackId) {
+  console.log('\n========== 🔘 BOUTON CLIQUÉ - Voir playlist mère ==========');
+  console.log(`   Source Playlist: "${sourcePlaylistName}"`);
+  console.log(`   Child Last Track ID (avant): "${childLastTrackId}"`);
+
+  // Chercher l'entry d'historique pour afficher le lastTrack
+  const historyEntry = state.playlistHistory.find(h => h.sourcePlaylist === sourcePlaylistName);
+  let finalTrackId = childLastTrackId;
+
+  if (historyEntry) {
+    console.log(`   Entry historique trouvée:`, historyEntry);
+    console.log(`   LastTrack complet:`, historyEntry.lastTrack);
+    console.log(`   ID présent dans historique: ${historyEntry.lastTrack?.id ? '✅ OUI' : '❌ NON'}`);
+
+    // Si l'ID est undefined, le récupérer directement depuis Spotify
+    if (!childLastTrackId || childLastTrackId === 'undefined') {
+      console.log(`⚠️ ID undefined! Récupération depuis Spotify API...`);
+      try {
+        const lastTrackFromApi = await getLastTrackFromPlaylist(historyEntry.id);
+        if (lastTrackFromApi && lastTrackFromApi.id) {
+          finalTrackId = lastTrackFromApi.id;
+          console.log(`✅ ID récupéré depuis API: ${finalTrackId}`);
+          // Mettre à jour l'historique avec l'ID
+          historyEntry.lastTrack = lastTrackFromApi;
+          const history = JSON.parse(localStorage.getItem('playlist_history') || '[]');
+          const index = history.findIndex(h => h.id === historyEntry.id);
+          if (index !== -1) {
+            history[index] = historyEntry;
+            localStorage.setItem('playlist_history', JSON.stringify(history));
+            state.playlistHistory = history;
+            console.log(`✅ Historique mis à jour avec l'ID`);
+          }
+        }
+      } catch (error) {
+        console.error(`❌ Erreur récupération ID depuis API:`, error);
+      }
+    }
+  }
+
+  console.log(`   Child Last Track ID (final): "${finalTrackId}"`);
+  goToParentPlaylist(sourcePlaylistName, finalTrackId);
+}
+
+// Naviguer vers la playlist mère et pré-sélectionner les tracks
+async function goToParentPlaylist(sourcePlaylistName, childLastTrackId) {
+  console.log('\n========== 🚀 DÉBUT goToParentPlaylist() ==========');
+  console.log(`📥 Paramètres reçus:`);
+  console.log(`   sourcePlaylistName: "${sourcePlaylistName}"`);
+  console.log(`   childLastTrackId: "${childLastTrackId}"`);
+
+  try {
+    // Trouver la playlist mère par son nom
+    console.log(`\n🔍 Recherche playlist mère: "${sourcePlaylistName}"`);
+    console.log(`   Playlists disponibles: ${state.playlists.length}`);
+    state.playlists.forEach((p, i) => {
+      console.log(`   ${i}: "${p.name}"`);
+    });
+
+    const parentPlaylist = state.playlists.find(p => p.name === sourcePlaylistName);
+    if (!parentPlaylist) {
+      console.log(`❌ Playlist source NOT FOUND!`);
+      alert(`❌ La playlist source "${sourcePlaylistName}" n'a pas été trouvée`);
+      return;
+    }
+
+    console.log(`✅ Playlist mère trouvée: "${parentPlaylist.name}" (ID: ${parentPlaylist.id})`);
+
+    // Fermer l'historique et sélectionner la playlist mère
+    console.log(`\n📱 Mise à jour interface...`);
+    state.showHistory = false;
+    state.selectedPlaylist = parentPlaylist;
+    state.loading = true;
+    state.view = 'tracks';
+    render();
+
+    // Charger les tracks de la playlist mère
+    try {
+      console.log(`\n🎵 Chargement des tracks de: "${parentPlaylist.name}"`);
+      let allTracks = [];
+      let url = `https://api.spotify.com/v1/playlists/${parentPlaylist.id}/tracks`;
+      let pageCount = 0;
+
+      while (url) {
+        pageCount++;
+        console.log(`   📥 Chargement page ${pageCount}...`);
+        const response = await fetch(url, {
+          headers: { 'Authorization': `Bearer ${state.token}` }
+        });
+        const data = await response.json();
+        const newItems = data.items.filter(item => item.track && item.added_at);
+        console.log(`       Page ${pageCount}: ${newItems.length} tracks`);
+        allTracks = [...allTracks, ...newItems];
+        url = data.next;
+      }
+
+      console.log(`✅ Total tracks chargées: ${allTracks.length}`);
+
+      // Trier par date d'ajout (plus récent en premier)
+      console.log(`\n📊 Tri par date d'ajout (plus récent en premier)...`);
+      allTracks.sort((a, b) => new Date(b.added_at) - new Date(a.added_at));
+      console.log(`✅ Tri effectué`);
+
+      state.tracks = allTracks;
+      state.selectedTracks = new Set();
+
+      // Chercher l'index du dernier track de la playlist enfant par son ID unique
+      console.log(`\n🔎 COMPARAISON DES IDs`);
+      console.log(`🔍 Track enfant ID recherché: "${childLastTrackId}"`);
+      console.log(`📊 Total tracks mère: ${allTracks.length}`);
+
+      let childTrackIndex = -1;
+
+      // Afficher tous les IDs des tracks pour le debug
+      console.log(`\n📋 Liste des IDs des tracks mère:`);
+      allTracks.forEach((t, i) => {
+        console.log(`   ${i}: ID="${t.track.id}" | Nom="${t.track.name}"`);
+      });
+
+      // Chercher le track par ID
+      console.log(`\n🔄 Boucle de recherche...`);
+      for (let i = 0; i < allTracks.length; i++) {
+        const currentTrackId = allTracks[i].track.id;
+        const match = currentTrackId === childLastTrackId;
+
+        console.log(`   Comparaison ${i}: "${currentTrackId}" === "${childLastTrackId}" ? ${match}`);
+
+        if (match) {
+          childTrackIndex = i;
+          console.log(`\n✅ ✅ ✅ MATCH TROUVÉ! ✅ ✅ ✅`);
+          console.log(`   Index: ${i}`);
+          console.log(`   ID: "${currentTrackId}"`);
+          console.log(`   Nom: "${allTracks[i].track.name}"`);
+          console.log(`   URI: "${allTracks[i].track.uri}"`);
+          break;
+        }
+      }
+
+      if (childTrackIndex === -1) {
+        console.log(`\n❌ ❌ ❌ AUCUN MATCH! ❌ ❌ ❌`);
+        console.log(`Track enfant ID introuvable: "${childLastTrackId}"`);
+        console.log(`⚠️ Aucune présélection effectuée`);
+      } else {
+        // Sélectionner tous les tracks du plus récent (index 0)
+        // jusqu'au track AVANT le dernier track enfant (index = childTrackIndex - 1)
+        // = Les tracks ajoutées APRÈS la création de la playlist enfant
+        console.log(`\n✅ SÉLECTION DES TRACKS`);
+        console.log(`📌 Du plus récent (index 0) jusqu'AVANT le track enfant (index ${childTrackIndex - 1})`);
+        console.log(`📌 Total à sélectionner: ${childTrackIndex} track(s)`);
+
+        for (let i = 0; i < childTrackIndex; i++) {
+          const trackId = allTracks[i].track.id;
+          state.selectedTracks.add(trackId);
+          console.log(`   ✓ [${i}] Sélectionné: "${allTracks[i].track.name}" -> ID: "${trackId}"`);
+        }
+
+        console.log(`\n✅ SÉLECTION TERMINÉE`);
+        console.log(`✅ Total dans state.selectedTracks: ${state.selectedTracks.size} track(s)`);
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      state.newPlaylistName = `New - ${parentPlaylist.name} - ${today} SPM`;
+
+      console.log(`\n📱 Mise à jour de l'interface...`);
+      state.loading = false;
+      render();
+
+      console.log(`\n========== ✅ FIN goToParentPlaylist() ✅ ==========\n`);
+    } catch (error) {
+      console.error('❌ ❌ ❌ ERREUR chargement tracks mère:', error);
+      console.error('Stack:', error.stack);
+      state.loading = false;
+      render();
+    }
+  } catch (error) {
+    console.error('❌ ❌ ❌ ERREUR navigation playlist mère:', error);
+    console.error('Stack:', error.stack);
+    alert('❌ Erreur lors de l\'accès à la playlist source');
+  }
+}
+
+// Ajouter les playlists détectées à l'historique
+async function addDetectedPlaylistsToHistory(detectedPlaylists) {
+  try {
+    const history = JSON.parse(localStorage.getItem('playlist_history') || '[]');
+    let updated = false;
+
+    for (const detected of detectedPlaylists) {
+      const { playlist, sourcePlaylistName } = detected;
+
+      // Chercher si cette playlist existe déjà dans l'historique
+      const existingIndex = history.findIndex(item => item.id === playlist.id);
+
+      if (existingIndex !== -1) {
+        // La playlist existe déjà dans l'historique
+        const existingEntry = history[existingIndex];
+
+        // Si elle n'a pas encore le dernier track, on le récupère
+        if (!existingEntry.lastTrack) {
+          console.log(`📥 Enrichissement du dernier track pour: ${playlist.name}`);
+          const lastTrack = await getLastTrackFromPlaylist(playlist.id);
+          existingEntry.lastTrack = lastTrack;
+          updated = true;
+        }
+      } else {
+        // La playlist n'existe pas dans l'historique, on la crée
+        console.log(`📌 Playlist détectée ajoutée à l'historique: ${playlist.name}`);
+        const lastTrack = await getLastTrackFromPlaylist(playlist.id);
+
+        const newEntry = {
+          id: playlist.id,
+          name: playlist.name,
+          url: playlist.external_urls?.spotify || '',
+          trackCount: playlist.tracks?.total || 0,
+          createdAt: Date.now(),
+          sourcePlaylist: sourcePlaylistName,
+          isPublic: playlist.public,
+          lastTrack: lastTrack
+        };
+
+        history.unshift(newEntry);
+        updated = true;
+      }
+    }
+
+    if (updated) {
+      // Limiter à 50 entrées
+      const limitedHistory = history.slice(0, 50);
+      localStorage.setItem('playlist_history', JSON.stringify(limitedHistory));
+      state.playlistHistory = limitedHistory;
+      console.log(`✅ Historique enrichi avec ${detectedPlaylists.length} détection(s)`);
+      render();
+    }
+  } catch (error) {
+    console.error('❌ Erreur ajout détections à historique:', error);
+  }
+}
+
 async function deletePlaylist(playlistId, playlistName) {
   if (!confirm(`⚠️ ATTENTION ⚠️\n\nVoulez-vous vraiment SUPPRIMER définitivement la playlist :\n"${playlistName}" ?\n\nCette action est IRRÉVERSIBLE !\nLa playlist sera définitivement supprimée de votre compte Spotify.`)) {
     return;
@@ -430,6 +726,13 @@ async function fetchPlaylists() {
 
     state.playlists = userPlaylists;
     console.log(`✅ ${userPlaylists.length} playlists personnelles chargées (${allPlaylists.length} au total)`);
+
+    // Détecter et ajouter les playlists créées à partir d'autres playlists
+    const detectedPlaylists = detectPlaylistOrigins();
+    if (detectedPlaylists.length > 0) {
+      await addDetectedPlaylistsToHistory(detectedPlaylists);
+    }
+
     state.loading = false;
     render();
   } catch (error) {
@@ -466,7 +769,7 @@ async function selectPlaylist(playlist) {
     state.selectedTracks = new Set();
     
     const today = new Date().toISOString().split('T')[0];
-    state.newPlaylistName = `New - ${playlist.name} - ${today}`;
+    state.newPlaylistName = `New - ${playlist.name} - ${today} SPM`;
     
     console.log(`✅ ${allTracks.length} pistes chargées (triées)`);
     state.loading = false;
@@ -489,7 +792,7 @@ function toggleTrack(trackId) {
   const checkbox = document.querySelector(`[data-track-id="${trackId}"]`);
   if (checkbox) {
     const isSelected = state.selectedTracks.has(trackId);
-    checkbox.innerHTML = `<i class="fa-${isSelected ? 'solid' : 'regular'} fa-square-check"></i>`;
+    checkbox.innerHTML = `<i class="fa-${isSelected ? 'solid fa-square-check' : 'regular fa-square'}"></i>`;
     const trackItem = checkbox.closest('.track-item');
     if (trackItem) {
       if (isSelected) {
@@ -651,11 +954,13 @@ async function createPlaylist() {
     checkpointData.status = 'completed';
     saveCheckpoint(checkpointData);
 
-    // Récupérer le dernier morceau ajouté (maintenant le premier de la liste inversée = dernier dans Spotify)
-    const lastTrackItem = reversedTrackObjects[reversedTrackObjects.length - 1];
+    // Récupérer le dernier morceau ajouté (le premier de la liste inversée = ajouté en dernier = plus récent dans Spotify)
+    const lastTrackItem = reversedTrackObjects[0];
     const lastTrack = lastTrackItem?.track;
 
-    console.log('🎵 Dernier morceau:', lastTrack); // Debug
+    console.log('🎵 Dernier morceau (plus récent):', lastTrack); // Debug
+    console.log(`   ID: ${lastTrack?.id}`);
+    console.log(`   Nom: ${lastTrack?.name}`);
 
     saveToHistory({
       id: playlist.id,
@@ -665,6 +970,7 @@ async function createPlaylist() {
       sourcePlaylist: state.selectedPlaylist.name,
       isPublic: state.isPublic,
       lastTrack: lastTrack ? {
+        id: lastTrack.id,
         name: lastTrack.name || 'Titre inconnu',
         artist: lastTrack.artists?.[0]?.name || 'Artiste inconnu',
         album: lastTrack.album?.name || '',
@@ -894,6 +1200,15 @@ function render() {
                             </p>
                           </div>
                           <div class="flex gap-sm" style="align-items: flex-start;">
+                            ${item.lastTrack ? `
+                              <button
+                                onclick="onParentPlaylistButtonClick('${item.sourcePlaylist.replace(/'/g, "\\'")}', '${item.lastTrack.id}')"
+                                class="btn btn-primary btn-icon"
+                                title="Voir la playlist source et pré-sélectionner les nouveaux morceaux"
+                              >
+                                <i class="fa-solid fa-arrow-up"></i>
+                              </button>
+                            ` : ''}
                             <a href="${item.url}" target="_blank" class="btn btn-primary btn-icon" title="Ouvrir dans Spotify">
                               <i class="fa-solid fa-link"></i>
                             </a>
@@ -989,7 +1304,7 @@ function render() {
                   onclick="toggleTrack('${item.track.id}')"
                   class="track-item ${state.selectedTracks.has(item.track.id) ? 'selected' : ''}"
                 >
-                  <span class="track-checkbox" data-track-id="${item.track.id}"><i class="fa-${state.selectedTracks.has(item.track.id) ? 'solid' : 'regular'} fa-square-check"></i></span>
+                  <span class="track-checkbox" data-track-id="${item.track.id}"><i class="fa-${state.selectedTracks.has(item.track.id) ? 'solid fa-square-check' : 'regular fa-square'}"></i></span>
                   ${item.track.album?.images[0] ? `<img src="${item.track.album.images[0].url}" class="track-cover" />` : ''}
                   <div class="track-info">
                     <div class="track-name">${item.track.name}</div>
