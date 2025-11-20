@@ -922,7 +922,7 @@ async function createPlaylist() {
     saveCheckpoint(checkpointData);
 
     const selectedTrackObjects = state.tracks.filter(t => state.selectedTracks.has(t.track.id));
-    // Inverser l'ordre des morceaux pour que le premier devienne le dernier
+    // Inverser pour retrouver l'ordre d'ajout original (state.tracks est trié du plus récent au plus vieux)
     const reversedTrackObjects = [...selectedTrackObjects].reverse();
     const uris = reversedTrackObjects.map(t => t.track.uri);
     const batchSize = 100;
@@ -954,8 +954,8 @@ async function createPlaylist() {
     checkpointData.status = 'completed';
     saveCheckpoint(checkpointData);
 
-    // Récupérer le dernier morceau ajouté (le premier de la liste inversée = ajouté en dernier = plus récent dans Spotify)
-    const lastTrackItem = reversedTrackObjects[0];
+    // Récupérer le dernier morceau ajouté (le premier du tableau inversé = le dernier dans l'ordre chronologique)
+    const lastTrackItem = reversedTrackObjects[reversedTrackObjects.length - 1];
     const lastTrack = lastTrackItem?.track;
 
     console.log('🎵 Dernier morceau (plus récent):', lastTrack); // Debug
@@ -979,6 +979,7 @@ async function createPlaylist() {
     });
 
     state.createdPlaylistUrl = playlist.external_urls.spotify;
+    state.progress = { current: 0, total: 0 };
 
     // Nettoyer le checkpoint après succès complet
     setTimeout(() => clearCheckpoint(), 2000);
